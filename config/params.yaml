@@ -1,0 +1,74 @@
+/**:
+  ros__parameters:
+    # --- 摄像头配置 ---
+    camera_topic: "/rgb_camera_front/compressed"
+    rgb_camera_frame: "front_camera_color_frame"
+
+    # 相机内参
+    fx: 640.0
+    fy: 640.0
+    cx: 640.0
+    cy: 360.0
+    camera_width: 1280
+    camera_height: 720
+    h_fov_rad: 1.0472          # 水平视场角，默认60度
+    v_fov_rad: 0.6435          # 垂直视场角，默认约36.9度
+
+    # 相机外参
+    camera_x: 0.0
+    camera_y: 0.0
+    camera_z: 1.0              # 相机安装高度
+    camera_pitch: 0.0          # 俯仰角，正值为向下
+    camera_yaw: 0.0
+    camera_roll: 0.0
+
+    # --- YOLO 模型配置 ---
+    # 模型路径（留空则自动从包 share 目录查找 only_pipe_det.onnx）
+    # 写相对文件名时也会自动补全为 <share>/<文件名>
+    yolo_model_path: "only_pipe_det.onnx"
+
+    # YOLOv11 OBB ONNX 输出格式（ultralytics 默认导出 imgsz=640 simplify opset=12）:
+    #   当前模型 only_pipe_det 为单类别，输出 [1, 6, 8400]
+    #   每列: cx, cy, w, h, class_score, angle(rad)
+    #   原双类别模型 wire_pipe_det 输出 [1, 7, 8400]：
+    #     每列: cx, cy, w, h, angle(rad), obj_conf, cls_logit
+    # 代码会自动检测通道数并解析。
+    obb_angle_is_radians: true # 角度单位：true = 弧度, false = 度
+    obb_format_xywh: true      # true = [cx, cy, w, h, angle, ...], false = [x1, y1, x2, y2, angle, ...]
+
+    # 类别（当前单类别模型仅使用 class_id=0，显示为 pipe / 绿色）
+    class_names: ["pipe"]
+    wire_class_id: -1          # -1 表示当前模型没有 wire 类别
+    water_pipe_class_id: 0     # class_id=0 统一按水管（绿色）显示
+
+    conf_threshold: 0.5        # 检测置信度阈值
+    distance_log_throttle_sec: 3.0  # [distance] 激光日志最小间隔（秒）
+
+    # --- 路径话题配置 ---
+    global_plan_topic: "teb_global_plan"
+    local_poses_topic: "teb_poses"
+
+    global_search_distance: 5.0   # 全局路径搜索距离
+    local_search_distance: 5.0    # 局部路径搜索距离
+
+    # --- 避让参数 ---
+    pedestrian_distance_threshold: 1.0  # 障碍物到路径的距离阈值
+    avoid_hold_seconds: 3.0             # 避让保持时间
+
+    # --- 水管/电线物理尺寸   用于单目距离估计 ---
+    # 水管的典型物理尺寸   米，用于 pinhole 距离估算
+    # 保洁用软管：直径约 0.02~0.05m，长度不定
+    wire_typical_width: 0.03     # 电线典型宽度
+    wire_typical_height: 0.01    # 电线典型高度，较细
+    water_pipe_typical_width: 0.04   # 水管典型宽度，直径
+    water_pipe_typical_height: 0.03  # 水管典型高度
+
+    # --- YOLO 跳帧 ---
+    yolo_frame_skip: 3           # 1 = 不跳帧
+
+    # --- 可视化 ---
+    publish_annotated_image: true
+    publish_debug_map_markers: true
+
+    # 地平线过滤：检测框全部在图像中线上方时视为天空误识别，直接忽略
+    filter_above_horizon: true
