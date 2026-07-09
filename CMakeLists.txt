@@ -20,6 +20,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 set(ONNXRUNTIME_INCLUDE_DIR /usr/local/include)
 set(ONNXRUNTIME_LIB_DIR /usr/local/lib)
@@ -45,6 +46,7 @@ ament_target_dependencies(wireandpipe_detection_node
   tf2_geometry_msgs
   tf2_ros
   visualization_msgs
+  std_srvs
 )
 
 target_link_libraries(wireandpipe_detection_node
