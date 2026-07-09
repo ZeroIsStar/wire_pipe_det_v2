@@ -23,6 +23,7 @@
 #include <queue>
 #include <thread>
 #include <vector>
+#include <std_srvs/srv/empty.hpp> 
 
 // ...（其他已有包含）
 
@@ -207,6 +208,15 @@ private:
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     rclcpp::Time last_marker_pub_time_;
+
+        // ===== 新增：手动添加虚拟障碍物服务 =====
+    rclcpp::Service<std_srvs::srv::Empty>::SharedPtr add_dummy_obstacle_srv_;
+    void addDummyObstacleCallback(
+        const std_srvs::srv::Empty::Request::SharedPtr req,
+        std_srvs::srv::Empty::Response::SharedPtr res);
+
+    // 辅助：获取路径前方 distance_meters 处的点（map 坐标系）
+    geometry_msgs::msg::Point getPointOnPathAhead(double distance_meters);
 };
 
 #endif  // WIREANDPIPE_DETECTION_CPP__WIREANDPIPE_DETECTION_HPP_
