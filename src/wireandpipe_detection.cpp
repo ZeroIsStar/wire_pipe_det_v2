@@ -288,7 +288,7 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     this->declare_parameter<double>("camera_yaw", 0.0);
     this->declare_parameter<double>("camera_roll", 0.0);
 
-    this->declare_parameter<std::string>("yolo_model_path", "/capella/lib/python3.10/site-packages/wire_pipe_det/src/7_6.onnx");
+    this->declare_parameter<std::string>("yolo_model_path", "/capella/lib/python3.10/site-packages/wire_pipe_det/src/7_8_1.onnx");
     this->declare_parameter<std::vector<std::string>>("class_names", std::vector<std::string>{"wire", "water_pipe"});
     this->declare_parameter<int>("wire_class_id", 0);
     this->declare_parameter<int>("water_pipe_class_id", 1);
@@ -456,6 +456,12 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
 
     next_track_id_ = 0;
 
+        // ----- 新增：创建手动添加障碍物服务 -----
+    add_dummy_obstacle_srv_ = this->create_service<std_srvs::srv::Empty>(
+        "add_dummy_obstacle",
+        std::bind(&WireAndPipeDetectionNode::addDummyObstacleCallback, this,
+                std::placeholders::_1, std::placeholders::_2));
+    RCLCPP_INFO(this->get_logger(), "Service 'add_dummy_obstacle' ready.");
     RCLCPP_INFO(this->get_logger(), "WireAndPipeDetectionNode initialized (Pure Monocular Vision Distance Estimation)");
     RCLCPP_INFO(this->get_logger(), "  Camera: %s", camera_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "  Model: %s", yolo_model_path.c_str());
@@ -1432,6 +1438,116 @@ double WireAndPipeDetectionNode::minDistanceToPath(
 }
 
 WireAndPipeDetectionNode::~WireAndPipeDetectionNode() = default;
+
+// ---------------------------------------------------------------------------
+// 获取路径前方 distance_meters 处的点（沿路径方向，map 坐标系）
+// ---------------------------------------------------------------------------
+geometry_msgs::msg::Point WireAndPipeDetectionNode::getPointOnPathAhead(double distance_meters)
+{
+    geometry_msgs::msg::Point result;
+    result.x = result.y = result.z = 0.0;
+
+    // 获取当前全局路径（map 坐标系）
+    std::vector<geometry_msgs::msg::Point> global_path;
+    {
+        std::lock_guard<std::mutex> lock(path_cache_mutex_);
+        global_path = cached_global_raw_;   // 原始路径点（已转换到 map）
+    }
+    if (global_path.empty()) {
+        RCLCPP_WARN(this->get_logger(), "No global path available, cannot compute ahead point.");
+        return result;
+    }
+
+    // 获取机器人当前位置（map 坐标系）
+    geometry_msgs::msg::TransformStamped robot_transform;
+    try {
+        robot_transform = tf_buffer_->lookupTransform("map", "base_link", rclcpp::Time(0));
+    } catch (const tf2::TransformException &e) {
+        RCLCPP_ERROR(this->get_logger(), "Cannot get robot transform: %s", e.what());
+        return result;
+    }
+    geometry_msgs::msg::Point robot_pos;
+    robot_pos.x = robot_transform.transform.translation.x;
+    robot_pos.y = robot_transform.transform.translation.y;
+    robot_pos.z = robot_transform.transform.translation.z;
+
+    // 找到路径上离机器人最近的点
+    double min_dist_sq = std::numeric_limits<double>::max();
+    size_t nearest_idx = 0;
+    for (size_t i = 0; i < global_path.size(); ++i) {
+        double dx = global_path[i].x - robot_pos.x;
+        double dy = global_path[i].y - robot_pos.y;
+        double dist_sq = dx*dx + dy*dy;
+        if (dist_sq < min_dist_sq) {
+            min_dist_sq = dist_sq;
+            nearest_idx = i;
+        }
+    }
+
+    // 从最近点开始，沿路径向前累加距离
+    double accumulated = 0.0;
+    for (size_t i = nearest_idx; i + 1 < global_path.size(); ++i) {
+        double dx = global_path[i+1].x - global_path[i].x;
+        double dy = global_path[i+1].y - global_path[i].y;
+        double seg_len = std::sqrt(dx*dx + dy*dy);
+        if (accumulated + seg_len >= distance_meters) {
+            // 插值出精确点
+            double ratio = (distance_meters - accumulated) / seg_len;
+            result.x = global_path[i].x + ratio * (global_path[i+1].x - global_path[i].x);
+            result.y = global_path[i].y + ratio * (global_path[i+1].y - global_path[i].y);
+            result.z = 0.0;
+            return result;
+        }
+        accumulated += seg_len;
+    }
+
+    // 如果路径总长度不足，取终点
+    if (!global_path.empty()) {
+        result = global_path.back();
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// 服务回调：手动添加虚拟障碍物（路径前方 1m）
+// ---------------------------------------------------------------------------
+void WireAndPipeDetectionNode::addDummyObstacleCallback(
+    const std_srvs::srv::Empty::Request::SharedPtr /*req*/,
+    std_srvs::srv::Empty::Response::SharedPtr /*res*/)
+{
+    const double AHEAD_DIST = 1.0;   // 前方 1 米
+    geometry_msgs::msg::Point dummy_pt = getPointOnPathAhead(AHEAD_DIST);
+    if (dummy_pt.x == 0.0 && dummy_pt.y == 0.0) {
+        RCLCPP_WARN(this->get_logger(), "Could not compute dummy point, abort.");
+        return;
+    }
+
+    // 添加到全局缓存（与图像检测相同的机制）
+    {
+        std::lock_guard<std::mutex> lock(g_known_obstacles_mutex);
+        // 检查是否已存在相近点（避免重复）
+        bool exists = false;
+        for (const auto &obs : g_known_obstacles) {
+            double dx = obs.pos.x - dummy_pt.x;
+            double dy = obs.pos.y - dummy_pt.y;
+            if (dx*dx + dy*dy < 0.1*0.1) { // 10cm 内视为已存在
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            KnownObstacle new_obs;
+            new_obs.pos = dummy_pt;
+            new_obs.last_seen = this->now();  // 当前时间
+            g_known_obstacles.push_back(new_obs);
+            RCLCPP_INFO(this->get_logger(), "Dummy obstacle added at (%.2f, %.2f)", 
+                        dummy_pt.x, dummy_pt.y);
+        } else {
+            RCLCPP_INFO(this->get_logger(), "Dummy point already exists in cache.");
+        }
+    }
+    // timerCallback 会在下一次周期自动检测此点并触发避让
+}
 
 // ---------------------------------------------------------------------------
 // main
