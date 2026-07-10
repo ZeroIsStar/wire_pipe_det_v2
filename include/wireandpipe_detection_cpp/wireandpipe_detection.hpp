@@ -78,6 +78,12 @@ public:
     ~WireAndPipeDetectionNode() override;   // 新增析构
 
 private:
+    double trigger_robot_distance_;   // 障碍物到机器人的触发距离阈值（米）
+    // 在 private 区域添加（例如放在其他订阅者声明附近）
+    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr sub_add_obstacle_point_;
+
+    // 回调函数声明
+    void addObstaclePointCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
     // ---- 回调函数 ----
     void imageCallback(const sensor_msgs::msg::CompressedImage::SharedPtr msg);
     void globalPlanCallback(const nav_msgs::msg::Path::SharedPtr msg);
