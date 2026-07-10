@@ -288,7 +288,7 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     this->declare_parameter<double>("camera_yaw", 0.0);
     this->declare_parameter<double>("camera_roll", 0.0);
 
-    this->declare_parameter<std::string>("yolo_model_path", "/capella/lib/python3.10/site-packages/wire_pipe_det/src/7_8_1.onnx");
+    this->declare_parameter<std::string>("yolo_model_path", "/capella/lib/python3.10/site-packages/wire_pipe_det/src/7_10.onnx");
     this->declare_parameter<std::vector<std::string>>("class_names", std::vector<std::string>{"wire", "water_pipe"});
     this->declare_parameter<int>("wire_class_id", 0);
     this->declare_parameter<int>("water_pipe_class_id", 1);
@@ -301,6 +301,7 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     this->declare_parameter<double>("local_search_distance", 5.0);
 
     this->declare_parameter<double>("pedestrian_distance_threshold", 1.0);
+    this->declare_parameter<double>("trigger_robot_distance", 2.0);   // 默认1.8米
     this->declare_parameter<double>("avoid_hold_seconds", 1.8);
 
     this->declare_parameter<int>("yolo_frame_skip", 3);
@@ -339,6 +340,7 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     water_pipe_class_id_ = this->get_parameter("water_pipe_class_id").as_int();
     conf_threshold_ = this->get_parameter("conf_threshold").as_double();
     distance_log_throttle_sec_ = this->get_parameter("distance_log_throttle_sec").as_double();
+    trigger_robot_distance_ = this->get_parameter("trigger_robot_distance").as_double();
 
     auto dist_vec = this->get_parameter("distortion_coefficients").as_double_array();
     if (dist_vec.size() >= 5) {
@@ -445,6 +447,13 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     // ---- TF ----
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    // ---- 新增：订阅地图点击/手动点，用于添加障碍物 ----
+    sub_add_obstacle_point_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
+        "/add_obstacle_point", 10,
+        std::bind(&WireAndPipeDetectionNode::addObstaclePointCallback, this,
+                std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "Subscribed to /add_obstacle_point for manual obstacles.");
 
     // ---- Timer ----
     timer_ = this->create_wall_timer(100ms, [this]() { this->timerCallback(); });
@@ -1191,15 +1200,37 @@ void WireAndPipeDetectionNode::timerCallback()
             }
 
             // 检查缓存中是否有障碍物在路径附近
+            // 获取机器人当前位置（map坐标系）
+            geometry_msgs::msg::TransformStamped robot_transform;
+            bool robot_transform_ok = false;
+            try {
+                robot_transform = tf_buffer_->lookupTransform("map", "base_link", rclcpp::Time(0));
+                robot_transform_ok = true;
+            } catch (const tf2::TransformException &e) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Cannot get robot transform for distance check: %s", e.what());
+            }
+
+            // 检查缓存中是否有障碍物在路径附近且距离机器人足够近
             for (const auto &obs : g_known_obstacles) {
                 double dist_global = minDistanceToPath(obs.pos, ds_global);
                 double dist_local  = minDistanceToPath(obs.pos, ds_local);
                 double min_dist = std::min(dist_global, dist_local);
-                if (std::isfinite(min_dist) && min_dist <= threshold) {
-                    trigger_now = true;
-                    hit_dist = min_dist;
-                    break;
+                if (!std::isfinite(min_dist) || min_dist > threshold) continue;
+
+                // 如果成功获取机器人位姿，检查障碍物到机器人的距离
+                if (robot_transform_ok) {
+                    double dx = obs.pos.x - robot_transform.transform.translation.x;
+                    double dy = obs.pos.y - robot_transform.transform.translation.y;
+                    double dist_to_robot = std::sqrt(dx*dx + dy*dy);
+                    if (dist_to_robot > trigger_robot_distance_) {
+                        continue;   // 距离机器人太远，不触发
+                    }
                 }
+                // 如果无法获取机器人位姿，则回退到原逻辑（只检查路径距离）
+                trigger_now = true;
+                hit_dist = min_dist;
+                break;
             }
         }
 
@@ -1547,6 +1578,73 @@ void WireAndPipeDetectionNode::addDummyObstacleCallback(
         }
     }
     // timerCallback 会在下一次周期自动检测此点并触发避让
+}
+
+// ---------------------------------------------------------------------------
+// 订阅点回调：将收到的点（任意坐标系）吸附到最近路径点并添加为障碍物
+// ---------------------------------------------------------------------------
+void WireAndPipeDetectionNode::addObstaclePointCallback(
+    const geometry_msgs::msg::PointStamped::SharedPtr msg)
+{
+    if (!msg) return;
+
+    // 1. 将点转换到 map 坐标系（如果不在 map）
+    geometry_msgs::msg::PointStamped p_map;
+    try {
+        tf_buffer_->transform(*msg, p_map, "map", tf2::durationFromSec(0.5));
+    } catch (const tf2::TransformException &e) {
+        RCLCPP_WARN(this->get_logger(), "Failed to transform point to map: %s", e.what());
+        return;
+    }
+
+    // 2. 获取当前全局路径（map 坐标系）
+    std::vector<geometry_msgs::msg::Point> global_path;
+    {
+        std::lock_guard<std::mutex> lock(path_cache_mutex_);
+        global_path = cached_global_raw_;
+    }
+    if (global_path.empty()) {
+        RCLCPP_WARN(this->get_logger(), "No global path available, cannot add obstacle.");
+        return;
+    }
+
+    // 3. 寻找路径上距离该点最近的点（欧氏距离）
+    double min_dist_sq = std::numeric_limits<double>::max();
+    geometry_msgs::msg::Point nearest_pt = global_path[0];
+    for (const auto &pt : global_path) {
+        double dx = p_map.point.x - pt.x;
+        double dy = p_map.point.y - pt.y;
+        double dsq = dx*dx + dy*dy;
+        if (dsq < min_dist_sq) {
+            min_dist_sq = dsq;
+            nearest_pt = pt;
+        }
+    }
+
+    // 4. 添加到缓存（去重）
+    {
+        std::lock_guard<std::mutex> lock(g_known_obstacles_mutex);
+        // 检查是否已存在相近点（0.1m内）
+        bool exists = false;
+        for (const auto &obs : g_known_obstacles) {
+            double dx = obs.pos.x - nearest_pt.x;
+            double dy = obs.pos.y - nearest_pt.y;
+            if (dx*dx + dy*dy < 0.1*0.1) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            KnownObstacle new_obs;
+            new_obs.pos = nearest_pt;
+            new_obs.last_seen = this->now();
+            g_known_obstacles.push_back(new_obs);
+            RCLCPP_INFO(this->get_logger(), "Manual obstacle added at path point (%.2f, %.2f)",
+                        nearest_pt.x, nearest_pt.y);
+        } else {
+            RCLCPP_INFO(this->get_logger(), "Obstacle already exists at this path point.");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
