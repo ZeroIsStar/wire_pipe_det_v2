@@ -288,7 +288,7 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     this->declare_parameter<double>("camera_yaw", 0.0);
     this->declare_parameter<double>("camera_roll", 0.0);
 
-    this->declare_parameter<std::string>("yolo_model_path", "/capella/lib/python3.10/site-packages/wire_pipe_det/src/7_10.onnx");
+    this->declare_parameter<std::string>("yolo_model_path", "/capella/lib/python3.10/site-packages/wire_pipe_det/src/7_14.onnx");
     this->declare_parameter<std::vector<std::string>>("class_names", std::vector<std::string>{"wire", "water_pipe"});
     this->declare_parameter<int>("wire_class_id", 0);
     this->declare_parameter<int>("water_pipe_class_id", 1);
@@ -301,7 +301,7 @@ WireAndPipeDetectionNode::WireAndPipeDetectionNode()
     this->declare_parameter<double>("local_search_distance", 5.0);
 
     this->declare_parameter<double>("pedestrian_distance_threshold", 1.0);
-    this->declare_parameter<double>("trigger_robot_distance", 2.0);   // 默认1.8米
+    this->declare_parameter<double>("trigger_robot_distance", 2.8);   // 默认1.8米
     this->declare_parameter<double>("avoid_hold_seconds", 1.8);
 
     this->declare_parameter<int>("yolo_frame_skip", 3);
